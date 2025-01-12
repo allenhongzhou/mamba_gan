@@ -173,7 +173,8 @@ class MultiDiscriminator(nn.Module):
         return outputs
 
 class Net(nn.Module):
-    def __init__(self, vgg, mamba, decoder, patch_embedding, patch_decoder, start_iter):
+    def __init__(self, vgg, mamba, decoder, feature_is_mixed, patch_embedding_1, patch_embedding_2,
+                 patch_decoder_1, patch_decoder_2, weight_1, weight_2, start_iter):
         super(Net, self).__init__()
         enc_layers = list(vgg.children())
         self.enc_1 = nn.Sequential(*enc_layers[:4])  # input -> relu1_1
@@ -185,10 +186,17 @@ class Net(nn.Module):
         #projection
         self.proj_style = projection_style
         self.proj_content = projection_content
+        self.feature_is_mixed = feature_is_mixed
 
         #patch embedding and path_embedding_reverse
-        self.patch_embedding = patch_embedding
-        self.patch_embedding_reverse = patch_decoder
+        self.patch_embedding_1 = patch_embedding_1
+        self.patch_embedding_reverse_1 = patch_decoder_1
+
+        self.patch_embedding_2 = patch_embedding_2
+        self.patch_embedding_reverse_2 = patch_decoder_2
+
+        self.weight_1 = weight_1
+        self.weight_2 = weight_2
 
         # mamba
         self.mamba = mamba
@@ -246,19 +254,36 @@ class Net(nn.Module):
 
     def forward(self, content):
         # step 1. 使用mamba + decoder，对content图片进行编解码重建
+        # branch1
         # [B, C, H, W] -> [B, num_patches, embed_dim]
-        patch_embed_content = self.patch_embedding(content)
+        patch_embed_content_1 = self.patch_embedding_1(content)
         # [B, num_patches, embed_dim] -> [B, num_patches, embed_dim]
-        encoded_content = self.mamba(patch_embed_content)
+        encoded_content_1 = self.mamba(patch_embed_content_1)
         # [B, num_patches, embed_dim] -> [B, embed_dim, num_patches] -> [B, embed_dim, grid_h, grid_w]
-        decoded_content = self.patch_embedding_reverse(
-            encoded_content, self.patch_embedding.pos_embed, self.patch_embedding.inverse_zigma_order)
+        decoded_content_1 = self.patch_embedding_reverse_1(
+            encoded_content_1, self.patch_embedding_1.pos_embed, self.patch_embedding_1.inverse_zigma_order)
         # [B, embed_dim, grid_h, grid_w] -> [B, C, H, W]
-        g_content = self.decoder(decoded_content)
+        g_content_1 = self.decoder(decoded_content_1)
+
+        if self.feature_is_mixed:
+            # branch2
+            # [B, C, H, W] -> [B, num_patches, embed_dim]
+            patch_embed_content_2 = self.patch_embedding_2(content)
+            # [B, num_patches, embed_dim] -> [B, num_patches, embed_dim]
+            encoded_content_2 = self.mamba(patch_embed_content_2)
+            # [B, num_patches, embed_dim] -> [B, embed_dim, num_patches] -> [B, embed_dim, grid_h, grid_w]
+            decoded_content_2 = self.patch_embedding_reverse_2(
+                encoded_content_2, self.patch_embedding_2.pos_embed, self.patch_embedding_2.inverse_zigma_order)
+            # [B, embed_dim, grid_h, grid_w] -> [B, C, H, W]
+            g_content_2 = self.decoder(decoded_content_2)
+
+            g_content = self.weight_1 * g_content_1 + self.weight_2 * g_content_2
+        else:
+            g_content = g_content_1
 
         content_feats = self.encode_with_intermediate(content)
         g_c_feats = self.encode_with_intermediate(g_content)
-        loss_c = self.calc_style_loss(g_c_feats[0], content_feats[0])
+        loss_c = self.calc_content_loss(g_c_feats[0], content_feats[0])
         for i in range(1, 5):
-            loss_c += self.calc_style_loss(content_feats[i], g_c_feats[i])
+            loss_c += self.calc_content_loss(content_feats[i], g_c_feats[i])
         return g_content, loss_c

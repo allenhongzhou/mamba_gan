@@ -77,7 +77,8 @@ if __name__ == '__main__':
     parser.add_argument('--style_dir', type=str, default='../dataset/monet2photo/trainA',
                         help='Directory path to a batch of style images')
     parser.add_argument('--vgg', type=str, default='model/vgg_normalised.pth')
-    parser.add_argument('--sample_path', type=str, default='samples2', help='Derectory to save the intermediate samples')
+    parser.add_argument('--sample_path', type=str, default='samples2',
+                        help='Derectory to save the intermediate samples')
 
     # training options
     parser.add_argument('--save_dir', default='./experiments',
@@ -96,7 +97,6 @@ if __name__ == '__main__':
     parser.add_argument('--start_iter', type=float, default=0)
     args = parser.parse_args('')
 
-
     os.environ['CUDA_VISIBLE_DEVICES'] = '0'
     device = torch.device('cuda')
 
@@ -106,9 +106,8 @@ if __name__ == '__main__':
     log_dir.mkdir(exist_ok=True, parents=True)
     writer = SummaryWriter(log_dir=str(log_dir))
 
-
     vgg = net.vgg
-    mamba = SingleMambaBlock(dim = 512)
+    mamba = SingleMambaBlock(dim=512)
     decoder = net.decoder
 
     valid = 1
@@ -120,7 +119,15 @@ if __name__ == '__main__':
     vgg = nn.Sequential(*list(vgg.children())[:44])
     # patch_embedding = PatchEmbeddingWithPosition()
     # patch_decoder = PatchDecoder()
-    network = net.Net(vgg, mamba, decoder, PatchEmbeddingWithPosition(zig_type=ZigMaType.UpToDownZig), PatchDecoder(), args.start_iter)
+    weight_1, weight_2 = 0.5, 0.5
+    weight_1 = torch.tensor(weight_1, device=device)
+    weight_2 = torch.tensor(weight_2, device=device)
+    # 是否需要融合两种扫描方式的特征
+    feature_is_mixed = True
+    network = net.Net(vgg, mamba, decoder, feature_is_mixed,
+                      PatchEmbeddingWithPosition(zig_type=ZigMaType.UpToDownZig),
+                      PatchEmbeddingWithPosition(zig_type=ZigMaType.LeftToRightZig),
+                      PatchDecoder(), PatchDecoder(), weight_1, weight_2, args.start_iter)
     network.train()
     network.to(device)
 
@@ -139,10 +146,20 @@ if __name__ == '__main__':
         sampler=InfiniteSamplerWrapper(style_dataset),
         num_workers=args.n_threads))
 
-    optimizer = torch.optim.Adam([{'params': network.decoder.parameters()},
-                                  {'params': network.mamba.parameters()},
-                                  {'params': network.patch_embedding.parameters()},
-                                  {'params': network.patch_embedding_reverse.parameters()},], lr=args.lr)
+    if not feature_is_mixed:
+        optimizer = torch.optim.Adam([{'params': network.decoder.parameters()},
+                                      {'params': network.mamba.parameters()},
+                                      {'params': network.patch_embedding_1.parameters()},
+                                      {'params': network.patch_embedding_reverse_1.parameters()}, ], lr=args.lr)
+    else:
+        optimizer = torch.optim.Adam([{'params': network.decoder.parameters()},
+                                      {'params': network.mamba.parameters()},
+                                      {'params': network.patch_embedding_1.parameters()},
+                                      {'params': network.patch_embedding_reverse_1.parameters()},
+                                      {'params': network.patch_embedding_2.parameters()},
+                                      {'params': network.patch_embedding_reverse_2.parameters()},
+                                      ], lr=args.lr)
+
     optimizer_D = torch.optim.Adam(D.parameters(), lr=args.lr, betas=(0.5, 0.999))
 
     # 支持异常情况中断的情况下，加载中断前保存的模型，继续训练
@@ -193,28 +210,41 @@ if __name__ == '__main__':
                 state_dict[key] = state_dict[key].to(torch.device('cpu'))
             torch.save(state_dict,
                        '{:s}/decoder_iter_{:d}.pth'.format(args.save_dir,
-                                                               i + 1))
+                                                           i + 1))
             state_dict = network.mamba.state_dict()
             for key in state_dict.keys():
                 state_dict[key] = state_dict[key].to(torch.device('cpu'))
             torch.save(state_dict,
                        '{:s}/mamba_iter_{:d}.pth'.format(args.save_dir,
-                                                               i + 1))
-            state_dict = network.patch_embedding.state_dict()
+                                                         i + 1))
+            state_dict = network.patch_embedding_1.state_dict()
             for key in state_dict.keys():
                 state_dict[key] = state_dict[key].to(torch.device('cpu'))
             torch.save(state_dict,
-                       '{:s}/patch_embedding_iter_{:d}.pth'.format(args.save_dir,
-                                                         i + 1))
-            state_dict = network.patch_embedding_reverse.state_dict()
+                       '{:s}/patch_embedding_1_iter_{:d}.pth'.format(args.save_dir,
+                                                                   i + 1))
+            state_dict = network.patch_embedding_reverse_1.state_dict()
             for key in state_dict.keys():
                 state_dict[key] = state_dict[key].to(torch.device('cpu'))
             torch.save(state_dict,
-                       '{:s}/patch_embedding_reverse_iter_{:d}.pth'.format(args.save_dir,
-                                                         i + 1))
+                       '{:s}/patch_embedding_reverse_1_iter_{:d}.pth'.format(args.save_dir,
+                                                                           i + 1))
 
+            if feature_is_mixed:
+                state_dict = network.patch_embedding_2.state_dict()
+                for key in state_dict.keys():
+                    state_dict[key] = state_dict[key].to(torch.device('cpu'))
+                torch.save(state_dict,
+                           '{:s}/patch_embedding_2_iter_{:d}.pth'.format(args.save_dir,
+                                                                         i + 1))
+                state_dict = network.patch_embedding_reverse_2.state_dict()
+                for key in state_dict.keys():
+                    state_dict[key] = state_dict[key].to(torch.device('cpu'))
+                torch.save(state_dict,
+                           '{:s}/patch_embedding_reverse_2_iter_{:d}.pth'.format(args.save_dir,
+                                                                                 i + 1))
             state_dict = optimizer.state_dict()
             torch.save(state_dict,
                        '{:s}/optimizer_iter_{:d}.pth'.format(args.save_dir,
-                                                               i + 1))
+                                                             i + 1))
     writer.close()
